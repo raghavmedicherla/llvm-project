@@ -241,6 +241,11 @@ add_llvm_component_library(LLVMSupport
   UnicodeNameToCodepointGenerated.cpp
   VersionTuple.cpp
   VirtualFileSystem.cpp
+  VirtualOutputBackend.cpp
+  VirtualOutputBackends.cpp
+  VirtualOutputConfig.cpp
+  VirtualOutputError.cpp
+  VirtualOutputFile.cpp
   WithColor.cpp
   X86TargetParser.cpp
   YAMLParser.cpp
