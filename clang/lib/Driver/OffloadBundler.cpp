@@ -170,20 +170,21 @@ public:
 
   /// Write the header of the bundled file to \a OS based on the information
   /// gathered from \a Inputs.
-  virtual Error WriteHeader(raw_fd_ostream &OS,
+  virtual Error WriteHeader(raw_pwrite_stream &OS,
                             ArrayRef<std::unique_ptr<MemoryBuffer>> Inputs) = 0;
 
   /// Write the marker that initiates a bundle for the triple \a TargetTriple to
   /// \a OS.
-  virtual Error WriteBundleStart(raw_fd_ostream &OS,
+  virtual Error WriteBundleStart(raw_pwrite_stream &OS,
                                  StringRef TargetTriple) = 0;
 
   /// Write the marker that closes a bundle for the triple \a TargetTriple to \a
   /// OS.
-  virtual Error WriteBundleEnd(raw_fd_ostream &OS, StringRef TargetTriple) = 0;
+  virtual Error WriteBundleEnd(raw_pwrite_stream &OS,
+                               StringRef TargetTriple) = 0;
 
   /// Write the bundle from \a Input into \a OS.
-  virtual Error WriteBundle(raw_fd_ostream &OS, MemoryBuffer &Input) = 0;
+  virtual Error WriteBundle(raw_pwrite_stream &OS, MemoryBuffer &Input) = 0;
 
   /// List bundle IDs in \a Input.
   virtual Error listBundleIDs(MemoryBuffer &Input) {
@@ -264,7 +265,7 @@ static uint64_t Read8byteIntegerFromBuffer(StringRef Buffer, size_t pos) {
 }
 
 /// Write 8-byte integers to a buffer in little-endian format.
-static void Write8byteIntegerToBuffer(raw_fd_ostream &OS, uint64_t Val) {
+static void Write8byteIntegerToBuffer(raw_pwrite_stream &OS, uint64_t Val) {
   for (unsigned i = 0; i < 8; ++i) {
     char Char = (char)(Val & 0xffu);
     OS.write(&Char, 1);
@@ -392,7 +393,7 @@ public:
     return Error::success();
   }
 
-  Error WriteHeader(raw_fd_ostream &OS,
+  Error WriteHeader(raw_pwrite_stream &OS,
                     ArrayRef<std::unique_ptr<MemoryBuffer>> Inputs) final {
 
     // Compute size of the header.
@@ -410,7 +411,6 @@ public:
     OS << OFFLOAD_BUNDLER_MAGIC_STR;
 
     Write8byteIntegerToBuffer(OS, BundlerConfig.TargetNames.size());
-
     unsigned Idx = 0;
     for (auto &T : BundlerConfig.TargetNames) {
       MemoryBuffer &MB = *Inputs[Idx++];
@@ -429,18 +429,19 @@ public:
     return Error::success();
   }
 
-  Error WriteBundleStart(raw_fd_ostream &OS, StringRef TargetTriple) final {
+  Error WriteBundleStart(raw_pwrite_stream &OS, StringRef TargetTriple) final {
     CurWriteBundleTarget = TargetTriple.str();
     return Error::success();
   }
 
-  Error WriteBundleEnd(raw_fd_ostream &OS, StringRef TargetTriple) final {
+  Error WriteBundleEnd(raw_pwrite_stream &OS, StringRef TargetTriple) final {
     return Error::success();
   }
 
-  Error WriteBundle(raw_fd_ostream &OS, MemoryBuffer &Input) final {
+  Error WriteBundle(raw_pwrite_stream &OS, MemoryBuffer &Input) final {
     auto BI = BundlesInfo[CurWriteBundleTarget];
-    OS.seek(BI.Offset);
+    OS.flush();
+    OS.write_zeros(BI.Offset - OS.tell());
     OS.write(Input.getBufferStart(), Input.getBufferSize());
     return Error::success();
   }
@@ -566,7 +567,7 @@ public:
     return Error::success();
   }
 
-  Error WriteHeader(raw_fd_ostream &OS,
+  Error WriteHeader(raw_pwrite_stream &OS,
                     ArrayRef<std::unique_ptr<MemoryBuffer>> Inputs) final {
     assert(BundlerConfig.HostInputIndex != ~0u &&
            "Host input index not defined.");
@@ -576,12 +577,12 @@ public:
     return Error::success();
   }
 
-  Error WriteBundleStart(raw_fd_ostream &OS, StringRef TargetTriple) final {
+  Error WriteBundleStart(raw_pwrite_stream &OS, StringRef TargetTriple) final {
     ++NumberOfProcessedInputs;
     return Error::success();
   }
 
-  Error WriteBundleEnd(raw_fd_ostream &OS, StringRef TargetTriple) final {
+  Error WriteBundleEnd(raw_pwrite_stream &OS, StringRef TargetTriple) final {
     assert(NumberOfProcessedInputs <= NumberOfInputs &&
            "Processing more inputs that actually exist!");
     assert(BundlerConfig.HostInputIndex != ~0u &&
@@ -601,7 +602,8 @@ public:
 
     // We write to the output file directly. So, we close it and use the name
     // to pass down to llvm-objcopy.
-    OS.close();
+    // FIXME(Raghav Medicherla): need a way to safely close the file.
+    // OS.close();
 
     // Temporary files that need to be removed.
     TempFileHandlerRAII TempFiles;
@@ -645,7 +647,7 @@ public:
     return Error::success();
   }
 
-  Error WriteBundle(raw_fd_ostream &OS, MemoryBuffer &Input) final {
+  Error WriteBundle(raw_pwrite_stream &OS, MemoryBuffer &Input) final {
     return Error::success();
   }
 
@@ -741,22 +743,22 @@ protected:
     return Error::success();
   }
 
-  Error WriteHeader(raw_fd_ostream &OS,
+  Error WriteHeader(raw_pwrite_stream &OS,
                     ArrayRef<std::unique_ptr<MemoryBuffer>> Inputs) final {
     return Error::success();
   }
 
-  Error WriteBundleStart(raw_fd_ostream &OS, StringRef TargetTriple) final {
+  Error WriteBundleStart(raw_pwrite_stream &OS, StringRef TargetTriple) final {
     OS << BundleStartString << TargetTriple << "\n";
     return Error::success();
   }
 
-  Error WriteBundleEnd(raw_fd_ostream &OS, StringRef TargetTriple) final {
+  Error WriteBundleEnd(raw_pwrite_stream &OS, StringRef TargetTriple) final {
     OS << BundleEndString << TargetTriple << "\n";
     return Error::success();
   }
 
-  Error WriteBundle(raw_fd_ostream &OS, MemoryBuffer &Input) final {
+  Error WriteBundle(raw_pwrite_stream &OS, MemoryBuffer &Input) final {
     OS << Input.getBuffer();
     return Error::success();
   }
