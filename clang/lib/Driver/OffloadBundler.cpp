@@ -14,9 +14,9 @@
 ///
 //===----------------------------------------------------------------------===//
 
+#include "clang/Driver/OffloadBundler.h"
 #include "clang/Basic/Cuda.h"
 #include "clang/Basic/Version.h"
-#include "clang/Driver/OffloadBundler.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
@@ -40,6 +40,8 @@
 #include "llvm/Support/Program.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/StringSaver.h"
+#include "llvm/Support/VirtualOutputBackend.h"
+#include "llvm/Support/VirtualOutputBackends.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
@@ -56,6 +58,7 @@
 using namespace llvm;
 using namespace llvm::object;
 using namespace clang;
+using namespace llvm::vfs;
 
 /// Magic string that marks the existence of offloading data.
 #define OFFLOAD_BUNDLER_MAGIC_STR "__CLANG_OFFLOAD_BUNDLE__"
@@ -917,6 +920,11 @@ Error OffloadBundler::BundleFiles() {
 
 // Unbundle the files. Return true if an error was found.
 Error OffloadBundler::UnbundleFiles() {
+  // The OnDiskOutputBackend
+  IntrusiveRefCntPtr<llvm::vfs::OutputBackend> TheOutputBackend;
+  TheOutputBackend =
+      llvm::makeIntrusiveRefCnt<llvm::vfs::OnDiskOutputBackend>();
+
   // Open Input file.
   ErrorOr<std::unique_ptr<MemoryBuffer>> CodeOrErr =
       MemoryBuffer::getFileOrSTDIN(BundlerConfig.InputFileNames.front());
@@ -967,17 +975,32 @@ Error OffloadBundler::UnbundleFiles() {
     if (Output == Worklist.end())
       continue;
 
-    // Check if the output file can be opened and copy the bundle to it.
-    std::error_code EC;
-    raw_fd_ostream OutputFile(Output->second, EC, sys::fs::OF_None);
-    if (EC)
-      return createFileError(Output->second, EC);
-    if (Error Err = FH->ReadBundle(OutputFile, Input))
+    Expected<OutputFile> OutputFile = TheOutputBackend->createFile(
+        Output->second, OutputConfig()
+                            .setTextWithCRLF()
+                            .setDiscardOnSignal()
+                            .setAtomicWrite()
+                            .setImplyCreateDirectories());
+
+    if (!OutputFile)
+      return OutputFile.takeError();
+
+    OutputFile->discardOnDestroy(
+        [](llvm::Error E) { consumeError(std::move(E)); });
+
+    if (Error Err = FH->ReadBundle(OutputFile->getOS(), Input))
       return Err;
     if (Error Err = FH->ReadBundleEnd(Input))
       return Err;
     Worklist.erase(Output);
 
+    /// FIXME:(Raghav Medicherla) How to report error message  using
+    /// E.convertToErrorCode().message();
+
+    if (Error Err = llvm::handleErrors(
+            OutputFile->keep(), [&](const llvm::vfs::TempFileOutputError &E) {},
+            [&](const llvm::vfs::OutputError &E) {}))
+      return Err;
     // Record if we found the host bundle.
     auto OffloadInfo = OffloadTargetInfo(CurTriple, BundlerConfig);
     if (OffloadInfo.hasHostKind())
@@ -1007,15 +1030,31 @@ Error OffloadBundler::UnbundleFiles() {
   // create empty files for the remaining targets.
   if (Worklist.size() == BundlerConfig.TargetNames.size()) {
     for (auto &E : Worklist) {
-      std::error_code EC;
-      raw_fd_ostream OutputFile(E.second, EC, sys::fs::OF_None);
-      if (EC)
-        return createFileError(E.second, EC);
+
+      Expected<OutputFile> OutputFile = TheOutputBackend->createFile(
+          E.second, OutputConfig()
+                        .setTextWithCRLF()
+                        .setDiscardOnSignal()
+                        .setAtomicWrite()
+                        .setImplyCreateDirectories());
+
+      if (!OutputFile)
+        return OutputFile.takeError();
+
+      OutputFile->discardOnDestroy(
+          [](llvm::Error E) { consumeError(std::move(E)); });
 
       // If this entry has a host kind, copy the input file to the output file.
       auto OffloadInfo = OffloadTargetInfo(E.getKey(), BundlerConfig);
       if (OffloadInfo.hasHostKind())
-        OutputFile.write(Input.getBufferStart(), Input.getBufferSize());
+        (OutputFile->getOS())
+            .write(Input.getBufferStart(), Input.getBufferSize());
+
+      if (Error Err = llvm::handleErrors(
+              OutputFile->keep(),
+              [&](const llvm::vfs::TempFileOutputError &E) {},
+              [&](const llvm::vfs::OutputError &E) {}))
+        return Err;
     }
     return Error::success();
   }
@@ -1028,10 +1067,24 @@ Error OffloadBundler::UnbundleFiles() {
 
   // If we still have any elements in the worklist, create empty files for them.
   for (auto &E : Worklist) {
-    std::error_code EC;
-    raw_fd_ostream OutputFile(E.second, EC, sys::fs::OF_None);
-    if (EC)
-      return createFileError(E.second, EC);
+
+    Expected<OutputFile> OutputFile = TheOutputBackend->createFile(
+        E.second, OutputConfig()
+                      .setTextWithCRLF()
+                      .setDiscardOnSignal()
+                      .setAtomicWrite()
+                      .setImplyCreateDirectories());
+
+    if (!OutputFile)
+      return OutputFile.takeError();
+
+    OutputFile->discardOnDestroy(
+        [](llvm::Error E) { consumeError(std::move(E)); });
+
+    if (auto Err = llvm::handleErrors(
+            OutputFile->keep(), [&](const llvm::vfs::TempFileOutputError &E) {},
+            [&](const llvm::vfs::OutputError &E) {}))
+      return Err;
   }
 
   return Error::success();
