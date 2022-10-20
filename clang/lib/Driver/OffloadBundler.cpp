@@ -458,30 +458,47 @@ namespace {
 class TempFileHandlerRAII {
 public:
   ~TempFileHandlerRAII() {
+    //Assumption: llvm-objcopy needs an actual file, so for now, we assume that this is only a file. In future when we modify llvm-objcopy this needs to be changed.
     for (const auto &File : Files)
-      sys::fs::remove(File);
+      if(sys::fs::remove(File))
+        llvm::errs() << "Error closing file: " << File << "\n";
   }
 
   // Creates temporary file with given contents.
   Expected<StringRef> Create(Optional<ArrayRef<char>> Contents) {
-    SmallString<128u> File;
-    if (std::error_code EC =
-            sys::fs::createTemporaryFile("clang-offload-bundler", "tmp", File))
-      return createFileError(File, EC);
-    Files.push_front(File);
+    if(!TheOutputBackend){
+        TheOutputBackend =
+      llvm::makeIntrusiveRefCnt<llvm::vfs::OnDiskOutputBackend>();
+    }
+    Expected<OutputFile> OutputFile = TheOutputBackend->createFile(
+      "clang-offload-bundler",
+      OutputConfig()
+          .setTextWithCRLF()
+          .setDiscardOnSignal()
+          .setAtomicWrite()
+          .setImplyCreateDirectories());
+    if (!OutputFile)
+    return OutputFile.takeError();
+
+    OutputFile->discardOnDestroy([](llvm::Error E) { consumeError(std::move(E)); });
+
+    Files.push_front(OutputFile->getPath());
 
     if (Contents) {
-      std::error_code EC;
-      raw_fd_ostream OS(File, EC);
-      if (EC)
-        return createFileError(File, EC);
-      OS.write(Contents->data(), Contents->size());
+      (OutputFile->getOS()).write(Contents->data(), Contents->size());
     }
-    return Files.front().str();
+
+    if (Error Err = llvm::handleErrors(
+            OutputFile->keep(), [&](const llvm::vfs::TempFileOutputError &E) {},
+           [&](const llvm::vfs::OutputError &E) {}))
+      return Err;
+  return Files.front().str();
   }
 
 private:
   std::forward_list<SmallString<128u>> Files;
+  IntrusiveRefCntPtr<llvm::vfs::OutputBackend> TheOutputBackend;
+
 };
 
 } // end anonymous namespace
