@@ -458,7 +458,9 @@ namespace {
 class TempFileHandlerRAII {
 public:
   ~TempFileHandlerRAII() {
-    //Assumption: llvm-objcopy needs an actual file, so for now, we assume that this is only a file. In future when we modify llvm-objcopy this needs to be changed.
+    // Assumption: llvm-objcopy needs an actual file, so for now, we assume that
+    // this is only a file. In future when we modify llvm-objcopy
+    // this needs to be changed.
     for (const auto &File : Files)
       if(sys::fs::remove(File))
         llvm::errs() << "Error closing file: " << File << "\n";
@@ -480,7 +482,8 @@ public:
     if (!OutputFile)
     return OutputFile.takeError();
 
-    OutputFile->discardOnDestroy([](llvm::Error E) { consumeError(std::move(E)); });
+    OutputFile->discardOnDestroy(
+        [](llvm::Error E) { consumeError(std::move(E)); });
 
     Files.push_front(OutputFile->getPath());
 
