@@ -55,9 +55,9 @@
 #include <system_error>
 #include <utility>
 
+using namespace clang;
 using namespace llvm;
 using namespace llvm::object;
-using namespace clang;
 using namespace llvm::vfs;
 
 /// Magic string that marks the existence of offloading data.
@@ -65,14 +65,13 @@ using namespace llvm::vfs;
 
 OffloadTargetInfo::OffloadTargetInfo(const StringRef Target,
                                      const OffloadBundlerConfig &BC)
-                                     : BundlerConfig(BC) {
+    : BundlerConfig(BC) {
 
   // TODO: Add error checking from ClangOffloadBundler.cpp
   auto TargetFeatures = Target.split(':');
   auto TripleOrGPU = TargetFeatures.first.rsplit('-');
 
-  if (clang::StringToCudaArch(TripleOrGPU.second) !=
-      clang::CudaArch::UNKNOWN) {
+  if (clang::StringToCudaArch(TripleOrGPU.second) != clang::CudaArch::UNKNOWN) {
     auto KindTriple = TripleOrGPU.first.split('-');
     this->OffloadKind = KindTriple.first;
     this->Triple = llvm::Triple(KindTriple.second);
@@ -91,20 +90,19 @@ bool OffloadTargetInfo::hasHostKind() const {
 
 bool OffloadTargetInfo::isOffloadKindValid() const {
   return OffloadKind == "host" || OffloadKind == "openmp" ||
-    OffloadKind == "hip" || OffloadKind == "hipv4";
+         OffloadKind == "hip" || OffloadKind == "hipv4";
 }
 
 bool OffloadTargetInfo::isOffloadKindCompatible(
-  const StringRef TargetOffloadKind) const {
+    const StringRef TargetOffloadKind) const {
   if (OffloadKind == TargetOffloadKind)
     return true;
   if (BundlerConfig.HipOpenmpCompatible) {
-    bool HIPCompatibleWithOpenMP =
-      OffloadKind.startswith_insensitive("hip") &&
-      TargetOffloadKind == "openmp";
+    bool HIPCompatibleWithOpenMP = OffloadKind.startswith_insensitive("hip") &&
+                                   TargetOffloadKind == "openmp";
     bool OpenMPCompatibleWithHIP =
-      OffloadKind == "openmp" &&
-      TargetOffloadKind.startswith_insensitive("hip");
+        OffloadKind == "openmp" &&
+        TargetOffloadKind.startswith_insensitive("hip");
     return HIPCompatibleWithOpenMP || OpenMPCompatibleWithHIP;
   }
   return false;
@@ -116,8 +114,7 @@ bool OffloadTargetInfo::isTripleValid() const {
 
 bool OffloadTargetInfo::operator==(const OffloadTargetInfo &Target) const {
   return OffloadKind == Target.OffloadKind &&
-    Triple.isCompatibleWith(Target.Triple) &&
-    GPUArch == Target.GPUArch;
+         Triple.isCompatibleWith(Target.Triple) && GPUArch == Target.GPUArch;
 }
 
 std::string OffloadTargetInfo::str() {
@@ -177,16 +174,16 @@ public:
                             ArrayRef<std::unique_ptr<MemoryBuffer>> Inputs) = 0;
 
   /// Write the marker that initiates a bundle for the triple \a TargetTriple to
-  /// \a OS.
+  /// \a OutputFile.
   virtual Error WriteBundleStart(OutputFile &OutputFile,
                                  StringRef TargetTriple) = 0;
 
-  /// Write the marker that closes a bundle for the triple \a TargetTriple to \a
-  /// OS.
+  /// Write the marker that closes a bundle for the triple \a TargetTriple to
+  /// \a OutputFile.
   virtual Error WriteBundleEnd(OutputFile &OutputFile,
                                StringRef TargetTriple) = 0;
 
-  /// Write the bundle from \a Input into \a OS.
+  /// Write the bundle from \a Input into \a OutputFile.
   virtual Error WriteBundle(OutputFile &OutputFile, MemoryBuffer &Input) = 0;
 
   /// List bundle IDs in \a Input.
@@ -444,9 +441,9 @@ public:
 
   Error WriteBundle(OutputFile &OutputFile, MemoryBuffer &Input) final {
     auto BI = BundlesInfo[CurWriteBundleTarget];
-    (OutputFile.getOS()).flush();
-    (OutputFile.getOS()).write_zeros(BI.Offset - (OutputFile.getOS()).tell());
-    (OutputFile.getOS()).write(Input.getBufferStart(), Input.getBufferSize());
+    OutputFile.getOS().flush();
+    OutputFile.getOS().write_zeros(BI.Offset - OutputFile.getOS().tell());
+    OutputFile.getOS().write(Input.getBufferStart(), Input.getBufferSize());
     return Error::success();
   }
 };
@@ -455,53 +452,40 @@ namespace {
 
 // This class implements a list of temporary files that are removed upon
 // object destruction.
+// FIXME: (Raghav Medicherla) Currently, there is no support to access
+// temporary files in llvm::vfs::OutputBackend.So, TempFileHandlerRAII class
+// should be changed once there is support to access temporary files
+// from llvm::vfs::OutputBackend.
 class TempFileHandlerRAII {
 public:
   ~TempFileHandlerRAII() {
-    // Assumption: llvm-objcopy needs an actual file, so for now, we assume that
-    // this is only a file. In future when we modify llvm-objcopy
+    // FIXME: (Raghav Medicherla) llvm-objcopy needs an actual file, so for now,
+    // we assume that this is only a file. In future when we modify llvm-objcopy
     // this needs to be changed.
     for (const auto &File : Files)
-      if(sys::fs::remove(File))
-        llvm::errs() << "Error closing file: " << File << "\n";
+      sys::fs::remove(File);
   }
 
   // Creates temporary file with given contents.
   Expected<StringRef> Create(Optional<ArrayRef<char>> Contents) {
-    if(!TheOutputBackend){
-        TheOutputBackend =
-      llvm::makeIntrusiveRefCnt<llvm::vfs::OnDiskOutputBackend>();
-    }
-    Expected<OutputFile> OutputFile = TheOutputBackend->createFile(
-      "clang-offload-bundler",
-      OutputConfig()
-          .setTextWithCRLF()
-          .setDiscardOnSignal()
-          .setAtomicWrite()
-          .setImplyCreateDirectories());
-    if (!OutputFile)
-    return OutputFile.takeError();
-
-    OutputFile->discardOnDestroy(
-        [](llvm::Error E) { consumeError(std::move(E)); });
-
-    Files.push_front(OutputFile->getPath());
+    SmallString<128u> File;
+    if (std::error_code EC =
+            sys::fs::createTemporaryFile("clang-offload-bundler", "tmp", File))
+      return createFileError(File, EC);
+    Files.push_front(File);
 
     if (Contents) {
-      (OutputFile->getOS()).write(Contents->data(), Contents->size());
+      std::error_code EC;
+      raw_fd_ostream OS(File, EC);
+      if (EC)
+        return createFileError(File, EC);
+      OS.write(Contents->data(), Contents->size());
     }
-
-    if (Error Err = llvm::handleErrors(
-            OutputFile->keep(), [&](const llvm::vfs::TempFileOutputError &E) {},
-           [&](const llvm::vfs::OutputError &E) {}))
-      return Err;
-  return Files.front().str();
+    return Files.front().str();
   }
 
 private:
   std::forward_list<SmallString<128u>> Files;
-  IntrusiveRefCntPtr<llvm::vfs::OutputBackend> TheOutputBackend;
-
 };
 
 } // end anonymous namespace
@@ -653,18 +637,16 @@ public:
         InputFile = *TempFileOrErr;
       }
 
-      ObjcopyArgs.push_back(SS.save(Twine("--add-section=") +
-                                    OFFLOAD_BUNDLER_MAGIC_STR +
-                                    BundlerConfig.TargetNames[I] +
-                                    "=" + InputFile));
-      ObjcopyArgs.push_back(SS.save(Twine("--set-section-flags=") +
-                                    OFFLOAD_BUNDLER_MAGIC_STR +
-                                    BundlerConfig.TargetNames[I] +
-                                    "=readonly,exclude"));
+      ObjcopyArgs.push_back(
+          SS.save(Twine("--add-section=") + OFFLOAD_BUNDLER_MAGIC_STR +
+                  BundlerConfig.TargetNames[I] + "=" + InputFile));
+      ObjcopyArgs.push_back(
+          SS.save(Twine("--set-section-flags=") + OFFLOAD_BUNDLER_MAGIC_STR +
+                  BundlerConfig.TargetNames[I] + "=readonly,exclude"));
     }
     ObjcopyArgs.push_back("--");
     ObjcopyArgs.push_back(
-      BundlerConfig.InputFileNames[BundlerConfig.HostInputIndex]);
+        BundlerConfig.InputFileNames[BundlerConfig.HostInputIndex]);
     ObjcopyArgs.push_back(BundlerConfig.OutputFileNames.front());
 
     if (Error Err = executeObjcopy(BundlerConfig.ObjcopyPath, ObjcopyArgs))
@@ -867,8 +849,8 @@ CreateFileHandler(MemoryBuffer &FirstInput,
 }
 
 // List bundle IDs. Return true if an error was found.
-Error OffloadBundler::ListBundleIDsInFile(StringRef InputFileName,
-                          const OffloadBundlerConfig &BundlerConfig) {
+Error OffloadBundler::ListBundleIDsInFile(
+    StringRef InputFileName, const OffloadBundlerConfig &BundlerConfig) {
   // Open Input file.
   ErrorOr<std::unique_ptr<MemoryBuffer>> CodeOrErr =
       MemoryBuffer::getFileOrSTDIN(InputFileName);
@@ -892,9 +874,9 @@ Error OffloadBundler::ListBundleIDsInFile(StringRef InputFileName,
 Error OffloadBundler::BundleFiles() {
   std::error_code EC;
 
-  // The OnDiskOutputBackend
-  IntrusiveRefCntPtr<llvm::vfs::OutputBackend> TheOutputBackend;
-  TheOutputBackend =
+  /// The \a OutputBackend, virtualizes compiler outputs to a specific backend.
+  /// In case of \a OnDiskOutputBackend, it writes compiler outputs to a disk.
+  IntrusiveRefCntPtr<llvm::vfs::OutputBackend> TheOutputBackend =
       llvm::makeIntrusiveRefCnt<llvm::vfs::OnDiskOutputBackend>();
 
   Expected<OutputFile> OutputFile = TheOutputBackend->createFile(
@@ -924,10 +906,10 @@ Error OffloadBundler::BundleFiles() {
   // Get the file handler. We use the host buffer as reference.
   assert((BundlerConfig.HostInputIndex != ~0u || BundlerConfig.AllowNoHost) &&
          "Host input index undefined??");
-  Expected<std::unique_ptr<FileHandler>> FileHandlerOrErr =
-      CreateFileHandler(*InputBuffers[BundlerConfig.AllowNoHost ? 0
-                        : BundlerConfig.HostInputIndex],
-                        BundlerConfig);
+  Expected<std::unique_ptr<FileHandler>> FileHandlerOrErr = CreateFileHandler(
+      *InputBuffers[BundlerConfig.AllowNoHost ? 0
+                                              : BundlerConfig.HostInputIndex],
+      BundlerConfig);
   if (!FileHandlerOrErr)
     return FileHandlerOrErr.takeError();
 
@@ -935,9 +917,6 @@ Error OffloadBundler::BundleFiles() {
   assert(FH);
 
   // Write header.
-  /// Passing \a OutputFile instead of a stream to all the write functions of \a
-  /// FileHandler classes.
-
   if (Error Err = FH->WriteHeader(*OutputFile, InputBuffers))
     return Err;
 
@@ -965,9 +944,10 @@ Error OffloadBundler::BundleFiles() {
 
 // Unbundle the files. Return true if an error was found.
 Error OffloadBundler::UnbundleFiles() {
-  // The OnDiskOutputBackend
-  IntrusiveRefCntPtr<llvm::vfs::OutputBackend> TheOutputBackend;
-  TheOutputBackend =
+
+  /// The \a OutputBackend, virtualizes compiler outputs to a specific backend.
+  /// In case of \a OnDiskOutputBackend, it writes compiler outputs to a disk.
+  IntrusiveRefCntPtr<llvm::vfs::OutputBackend> TheOutputBackend =
       llvm::makeIntrusiveRefCnt<llvm::vfs::OnDiskOutputBackend>();
 
   // Open Input file.
@@ -1039,9 +1019,6 @@ Error OffloadBundler::UnbundleFiles() {
       return Err;
     Worklist.erase(Output);
 
-    // FIXME:(Raghav Medicherla) How to report error message  using
-    // E.convertToErrorCode().message();
-
     if (Error Err = llvm::handleErrors(
             OutputFile->keep(), [&](const llvm::vfs::TempFileOutputError &E) {},
             [&](const llvm::vfs::OutputError &E) {}))
@@ -1092,8 +1069,8 @@ Error OffloadBundler::UnbundleFiles() {
       // If this entry has a host kind, copy the input file to the output file.
       auto OffloadInfo = OffloadTargetInfo(E.getKey(), BundlerConfig);
       if (OffloadInfo.hasHostKind())
-        (OutputFile->getOS())
-            .write(Input.getBufferStart(), Input.getBufferSize());
+        OutputFile->getOS().write(Input.getBufferStart(),
+                                  Input.getBufferSize());
 
       if (Error Err = llvm::handleErrors(
               OutputFile->keep(),
@@ -1295,8 +1272,7 @@ Error OffloadBundler::UnbundleArchive() {
       auto CodeObjectInfo = OffloadTargetInfo(CodeObject, BundlerConfig);
       if (CodeObjectInfo.hasHostKind()) {
         // Do nothing, we don't extract host code yet.
-      } else if (getCompatibleOffloadTargets(CodeObjectInfo,
-                                             CompatibleTargets,
+      } else if (getCompatibleOffloadTargets(CodeObjectInfo, CompatibleTargets,
                                              BundlerConfig)) {
         std::string BundleData;
         raw_string_ostream DataStream(BundleData);
